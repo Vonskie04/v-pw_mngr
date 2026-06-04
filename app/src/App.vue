@@ -1,5 +1,5 @@
 <script setup>
-import { computed, onMounted, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 
 const length = ref(16)
 const includeUppercase = ref(true)
@@ -12,6 +12,12 @@ const tagLabel = ref('')
 const notepadNote = ref('')
 const copyStatus = ref('')
 const notepadStatus = ref('')
+const activeCopiedEntryId = ref(null)
+const entryCopyMessage = ref('')
+const showStartupLoader = ref(true)
+const startupLoadingMs = import.meta.env.MODE === 'test' ? 0 : 850
+let entryCopyTimeoutId = null
+let startupLoaderTimeoutId = null
 const storageKey = 'password-notepad-entries-v1'
 
 const savedEntries = ref([])
@@ -69,10 +75,22 @@ async function copyPassword() {
 async function copySavedEntry(entry) {
   try {
     await navigator.clipboard.writeText(entry.password)
-    notepadStatus.value = `Copied password for ${entry.tag}.`
+    activeCopiedEntryId.value = entry.id
+    entryCopyMessage.value = 'Copied!'
   } catch {
-    notepadStatus.value = 'Clipboard blocked in this browser tab.'
+    activeCopiedEntryId.value = entry.id
+    entryCopyMessage.value = 'Clipboard blocked'
   }
+
+  if (entryCopyTimeoutId) {
+    clearTimeout(entryCopyTimeoutId)
+  }
+
+  entryCopyTimeoutId = setTimeout(() => {
+    activeCopiedEntryId.value = null
+    entryCopyMessage.value = ''
+    entryCopyTimeoutId = null
+  }, 1200)
 }
 
 function saveToNotepad() {
@@ -106,6 +124,11 @@ onMounted(() => {
   } catch {
     notepadStatus.value = 'Could not load saved notepad entries.'
   }
+
+  startupLoaderTimeoutId = setTimeout(() => {
+    showStartupLoader.value = false
+    startupLoaderTimeoutId = null
+  }, startupLoadingMs)
 })
 
 watch(
@@ -120,80 +143,100 @@ watch(
   { deep: true },
 )
 
+onBeforeUnmount(() => {
+  if (entryCopyTimeoutId) {
+    clearTimeout(entryCopyTimeoutId)
+  }
+
+  if (startupLoaderTimeoutId) {
+    clearTimeout(startupLoaderTimeoutId)
+  }
+})
+
 generatePassword()
 </script>
 
 <template>
-  <main class="page">
-    <section class="card">
-      <h1>Password Generator</h1>
-      <p class="subtitle">Create strong passwords, add a label tag, and save them in your notepad.</p>
-
-      <div class="password-row">
-        <output class="password-box">{{ generatedPassword || 'Pick options and generate' }}</output>
-        <button class="ghost copy-generated" @click="copyPassword">Copy</button>
+  <div class="app-shell">
+    <transition name="startup-loader-fade">
+      <div v-if="showStartupLoader" class="startup-loader" role="status" aria-live="polite">
+        <span class="startup-spinner" aria-hidden="true" />
+        <p class="startup-label">Loading vault...</p>
       </div>
-      <small class="status">{{ copyStatus }}</small>
+    </transition>
 
-      <div class="controls">
-        <label for="pw-length">Length: {{ length }}</label>
-        <input id="pw-length" v-model="length" type="range" min="8" max="64" />
+    <main class="page">
+      <section class="card">
+        <h1>Password Generator</h1>
+        <p class="subtitle">Create strong passwords, add a label tag, and save them in your notepad.</p>
 
-        <label><input v-model="includeUppercase" type="checkbox" /> Uppercase (A-Z)</label>
-        <label><input v-model="includeLowercase" type="checkbox" /> Lowercase (a-z)</label>
-        <label><input v-model="includeNumbers" type="checkbox" /> Numbers (0-9)</label>
-        <label><input v-model="includeSymbols" type="checkbox" /> Symbols (!@#$)</label>
-      </div>
+        <div class="password-row">
+          <output class="password-box">{{ generatedPassword || 'Pick options and generate' }}</output>
+          <button class="ghost copy-generated" @click="copyPassword">Copy</button>
+        </div>
+        <small class="status">{{ copyStatus }}</small>
 
-      <button class="generate" :disabled="!canGenerate" @click="generatePassword">Generate Password</button>
-    </section>
+        <div class="controls">
+          <label for="pw-length">Length: {{ length }}</label>
+          <input id="pw-length" v-model="length" type="range" min="8" max="64" />
 
-    <section class="card notepad">
-      <h2>Passwords Notepad</h2>
+          <label><input v-model="includeUppercase" type="checkbox" /> Uppercase (A-Z)</label>
+          <label><input v-model="includeLowercase" type="checkbox" /> Lowercase (a-z)</label>
+          <label><input v-model="includeNumbers" type="checkbox" /> Numbers (0-9)</label>
+          <label><input v-model="includeSymbols" type="checkbox" /> Symbols (!@#$)</label>
+        </div>
 
-      <label for="entry-tag">Label Tag</label>
-      <input
-        id="entry-tag"
-        v-model="tagLabel"
-        type="text"
-        placeholder="Example: Email, Bank, Work VPN"
-      />
+        <button class="generate" :disabled="!canGenerate" @click="generatePassword">Generate Password</button>
+      </section>
 
-      <label for="entry-note">Note</label>
-      <textarea
-        id="entry-note"
-        v-model="notepadNote"
-        rows="3"
-        placeholder="Optional note for this password"
-      />
+      <section class="card notepad">
+        <h2>Passwords Notepad</h2>
 
-      <button class="save" :disabled="!generatedPassword" @click="saveToNotepad">Save Generated Password</button>
-      <small class="status">{{ notepadStatus }}</small>
+        <label for="entry-tag">Label Tag</label>
+        <input
+          id="entry-tag"
+          v-model="tagLabel"
+          type="text"
+          placeholder="Example: Email, Bank, Work VPN"
+        />
 
-      <ul class="entries">
-        <li v-for="entry in savedEntries" :key="entry.id" class="entry">
-          <button
-            class="ghost copy-entry"
-            aria-label="Copy saved password"
-            title="Copy saved password"
-            @click="copySavedEntry(entry)"
-          >
-            <svg viewBox="0 0 24 24" aria-hidden="true">
-              <path
-                d="M9 3h10a2 2 0 0 1 2 2v10h-2V5H9zM5 7h10a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V9a2 2 0 0 1 2-2zm0 2v10h10V9z"
-              />
-            </svg>
-          </button>
-          <p class="entry-tag">{{ entry.tag }}</p>
-          <p class="entry-password">{{ entry.password }}</p>
-          <p v-if="entry.note" class="entry-note">{{ entry.note }}</p>
-          <div class="entry-actions">
-            <button class="ghost delete-entry" @click="removeEntry(entry.id)">Delete</button>
-          </div>
-        </li>
-      </ul>
-    </section>
-  </main>
+        <label for="entry-note">Note</label>
+        <textarea
+          id="entry-note"
+          v-model="notepadNote"
+          rows="3"
+          placeholder="Optional note for this password"
+        />
+
+        <button class="save" :disabled="!generatedPassword" @click="saveToNotepad">Save Generated Password</button>
+        <small class="status">{{ notepadStatus }}</small>
+
+        <ul class="entries">
+          <li v-for="entry in savedEntries" :key="entry.id" class="entry">
+            <span v-if="activeCopiedEntryId === entry.id" class="copy-popup">{{ entryCopyMessage }}</span>
+            <button
+              class="ghost copy-entry"
+              aria-label="Copy saved password"
+              title="Copy saved password"
+              @click="copySavedEntry(entry)"
+            >
+              <svg viewBox="0 0 24 24" aria-hidden="true">
+                <path
+                  d="M9 3h10a2 2 0 0 1 2 2v10h-2V5H9zM5 7h10a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V9a2 2 0 0 1 2-2zm0 2v10h10V9z"
+                />
+              </svg>
+            </button>
+            <p class="entry-tag">{{ entry.tag }}</p>
+            <p class="entry-password">{{ entry.password }}</p>
+            <p v-if="entry.note" class="entry-note">{{ entry.note }}</p>
+            <div class="entry-actions">
+              <button class="ghost delete-entry" @click="removeEntry(entry.id)">Delete</button>
+            </div>
+          </li>
+        </ul>
+      </section>
+    </main>
+  </div>
 </template>
 
 <style scoped>
@@ -211,6 +254,52 @@ generatePassword()
   padding: 1.25rem;
   max-width: 1100px;
   margin: 0 auto;
+}
+
+.app-shell {
+  position: relative;
+}
+
+.startup-loader {
+  position: fixed;
+  inset: 0;
+  z-index: 20;
+  display: grid;
+  place-items: center;
+  gap: 0.8rem;
+  background: rgba(241, 247, 255, 0.9);
+  backdrop-filter: blur(2px);
+}
+
+.startup-label {
+  margin: 0;
+  color: #214662;
+  font-weight: 700;
+}
+
+.startup-spinner {
+  width: 2.6rem;
+  height: 2.6rem;
+  border-radius: 999px;
+  border: 0.26rem solid rgba(33, 70, 98, 0.15);
+  border-top-color: #0f7f67;
+  animation: startup-spin 0.75s linear infinite;
+}
+
+.startup-loader-fade-enter-active,
+.startup-loader-fade-leave-active {
+  transition: opacity 220ms ease;
+}
+
+.startup-loader-fade-enter-from,
+.startup-loader-fade-leave-to {
+  opacity: 0;
+}
+
+@keyframes startup-spin {
+  to {
+    transform: rotate(360deg);
+  }
 }
 
 .card {
@@ -362,6 +451,43 @@ button:disabled {
   align-items: center;
   justify-content: center;
   padding: 0;
+}
+
+.copy-popup {
+  position: absolute;
+  right: 0.45rem;
+  top: -1.1rem;
+  padding: 0.2rem 0.45rem;
+  border-radius: 999px;
+  font-size: 0.72rem;
+  font-weight: 700;
+  color: #ffffff;
+  background: #0f7f67;
+  box-shadow: 0 6px 18px rgba(9, 39, 66, 0.24);
+  pointer-events: none;
+  animation: copy-popup-fade 1.2s ease forwards;
+}
+
+@keyframes copy-popup-fade {
+  0% {
+    opacity: 0;
+    transform: translateY(6px) scale(0.9);
+  }
+
+  15% {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+
+  75% {
+    opacity: 1;
+    transform: translateY(-1px) scale(1);
+  }
+
+  100% {
+    opacity: 0;
+    transform: translateY(-6px) scale(0.95);
+  }
 }
 
 .copy-entry svg {
