@@ -1,5 +1,5 @@
 <script setup>
-import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 
 const length = ref(16)
 const includeUppercase = ref(true)
@@ -19,6 +19,9 @@ const startupLoadingMs = import.meta.env.MODE === 'test' ? 0 : 850
 let entryCopyTimeoutId = null
 let startupLoaderTimeoutId = null
 const storageKey = 'password-notepad-entries-v1'
+const apiBaseUrl = (import.meta.env.VITE_API_BASE_URL || '').replace(/\/$/, '')
+const credentialsEndpoint = `${apiBaseUrl}/api/credentials`
+const isDatabaseMode = ref(false)
 
 const savedEntries = ref([])
 
@@ -34,6 +37,70 @@ const charset = computed(() => {
 })
 
 const canGenerate = computed(() => charset.value.length > 0)
+
+function normalizeEntry(entry) {
+  return {
+    id: typeof entry?.id === 'number' || typeof entry?.id === 'string' ? entry.id : Date.now(),
+    tag: typeof entry?.tag === 'string' && entry.tag.trim() ? entry.tag.trim() : 'Untitled',
+    password: typeof entry?.password === 'string' ? entry.password : '',
+    note: typeof entry?.note === 'string' ? entry.note : '',
+  }
+}
+
+function loadEntriesFromLocalStorage() {
+  if (typeof localStorage === 'undefined') return
+
+  try {
+    const raw = localStorage.getItem(storageKey)
+    if (!raw) return
+
+    const parsed = JSON.parse(raw)
+    if (Array.isArray(parsed)) {
+      savedEntries.value = parsed.map(normalizeEntry)
+    }
+  } catch {
+    notepadStatus.value = 'Could not load saved notepad entries.'
+  }
+}
+
+function persistEntriesToLocalStorage(entries) {
+  if (typeof localStorage === 'undefined') return
+
+  try {
+    localStorage.setItem(storageKey, JSON.stringify(entries))
+  } catch {
+    notepadStatus.value = 'Could not persist notepad entries.'
+  }
+}
+
+async function syncEntriesFromDatabase() {
+  if (typeof fetch !== 'function') return false
+
+  try {
+    const response = await fetch(credentialsEndpoint)
+    if (!response.ok) {
+      throw new Error('Failed to fetch credentials')
+    }
+
+    const payload = await response.json()
+    if (!Array.isArray(payload)) {
+      throw new Error('Invalid credentials payload')
+    }
+
+    savedEntries.value = payload.map(normalizeEntry)
+    isDatabaseMode.value = true
+    return true
+  } catch {
+    return false
+  }
+}
+
+async function initializeEntries() {
+  const loadedFromDatabase = await syncEntriesFromDatabase()
+  if (!loadedFromDatabase) {
+    loadEntriesFromLocalStorage()
+  }
+}
 
 function randomIndex(max) {
   if (window.crypto?.getRandomValues) {
@@ -93,36 +160,84 @@ async function copySavedEntry(entry) {
   }, 1200)
 }
 
-function saveToNotepad() {
+async function saveToNotepad() {
   if (!generatedPassword.value) return
+  let localStatus = ''
 
-  savedEntries.value.unshift({
-    id: Date.now(),
+  const payload = {
     tag: tagLabel.value.trim() || 'Untitled',
     password: generatedPassword.value,
     note: notepadNote.value.trim(),
+  }
+
+  if (isDatabaseMode.value && typeof fetch === 'function') {
+    try {
+      const response = await fetch(credentialsEndpoint, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      })
+
+      if (!response.ok) {
+        throw new Error('Failed to save credential')
+      }
+
+      const createdEntry = normalizeEntry(await response.json())
+      savedEntries.value.unshift(createdEntry)
+      notepadStatus.value = 'Saved to database.'
+      tagLabel.value = ''
+      notepadNote.value = ''
+      return
+    } catch {
+      isDatabaseMode.value = false
+      localStatus = 'Database unavailable. Saved locally on this device.'
+    }
+  }
+
+  savedEntries.value.unshift({
+    id: Date.now(),
+    tag: payload.tag,
+    password: payload.password,
+    note: payload.note,
   })
+
+  persistEntriesToLocalStorage(savedEntries.value)
 
   tagLabel.value = ''
   notepadNote.value = ''
-  notepadStatus.value = ''
+  notepadStatus.value = localStatus
 }
 
-function removeEntry(id) {
-  savedEntries.value = savedEntries.value.filter((entry) => entry.id !== id)
+async function removeEntry(id) {
+  const normalizedId = String(id)
+
+  if (isDatabaseMode.value && typeof fetch === 'function') {
+    try {
+      const response = await fetch(`${credentialsEndpoint}/${encodeURIComponent(normalizedId)}`, {
+        method: 'DELETE',
+      })
+
+      if (!response.ok && response.status !== 404) {
+        throw new Error('Failed to delete credential')
+      }
+    } catch {
+      notepadStatus.value = 'Could not delete credential from database.'
+      return
+    }
+  }
+
+  savedEntries.value = savedEntries.value.filter((entry) => String(entry.id) !== normalizedId)
+
+  if (!isDatabaseMode.value) {
+    persistEntriesToLocalStorage(savedEntries.value)
+  }
 }
 
 onMounted(() => {
-  try {
-    const raw = localStorage.getItem(storageKey)
-    if (!raw) return
-
-    const parsed = JSON.parse(raw)
-    if (Array.isArray(parsed)) {
-      savedEntries.value = parsed
-    }
-  } catch {
-    notepadStatus.value = 'Could not load saved notepad entries.'
+  if (import.meta.env.MODE === 'test') {
+    loadEntriesFromLocalStorage()
+  } else {
+    void initializeEntries()
   }
 
   startupLoaderTimeoutId = setTimeout(() => {
@@ -130,18 +245,6 @@ onMounted(() => {
     startupLoaderTimeoutId = null
   }, startupLoadingMs)
 })
-
-watch(
-  savedEntries,
-  (entries) => {
-    try {
-      localStorage.setItem(storageKey, JSON.stringify(entries))
-    } catch {
-      notepadStatus.value = 'Could not persist notepad entries.'
-    }
-  },
-  { deep: true },
-)
 
 onBeforeUnmount(() => {
   if (entryCopyTimeoutId) {
